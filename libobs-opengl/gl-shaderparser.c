@@ -745,7 +745,6 @@ static void gl_rename_attributes(struct gl_shader_parser *glsp)
 static bool gl_shader_buildstring(struct gl_shader_parser *glsp)
 {
 	struct shader_func *main_func;
-	char *version_str;
 
 	main_func = shader_parser_getfunc(&glsp->parser, "main");
 	if (!main_func) {

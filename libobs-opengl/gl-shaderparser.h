@@ -49,7 +49,6 @@ struct gl_shader_parser {
 	struct shader_parser parser;
 	struct dstr gl_string;
 	int sincos_counter;
-	int version;
 
 	DARRAY(uint32_t) texture_samplers;
 	DARRAY(struct gl_parser_attrib) attribs;
@@ -59,7 +58,6 @@ static inline void gl_shader_parser_init(struct gl_shader_parser *glsp,
 					 enum gs_shader_type type)
 {
 	glsp->type = type;
-	glsp->version = 330;
 
 	if (type == GS_SHADER_VERTEX) {
 		glsp->input_prefix = "_input_attrib";
