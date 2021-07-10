@@ -330,7 +330,7 @@ struct obs_core_audio {
 
 	uint64_t buffered_ts;
 	struct circlebuf buffered_timestamps;
-	int buffering_wait_ticks;
+	uint64_t buffering_wait_ticks;
 	int total_buffering_ticks;
 
 	float user_volume;
@@ -685,6 +685,7 @@ struct obs_source {
 	int async_channel_count;
 	long async_rotation;
 	bool async_flip;
+	bool async_linear_alpha;
 	bool async_active;
 	bool async_update_texture;
 	bool async_unbuffered;

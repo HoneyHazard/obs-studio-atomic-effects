@@ -25,6 +25,8 @@
 /* clang-format on */
 
 #define WC_CHECK_TIMER 1.0f
+#define RESIZE_CHECK_TIME 0.2f
+#define CURSOR_CHECK_TIME 0.2f
 
 typedef BOOL (*PFN_winrt_capture_supported)();
 typedef BOOL (*PFN_winrt_capture_cursor_toggle_supported)();
@@ -33,7 +35,7 @@ typedef struct winrt_capture *(*PFN_winrt_capture_init_window)(
 typedef void (*PFN_winrt_capture_free)(struct winrt_capture *capture);
 
 typedef BOOL (*PFN_winrt_capture_active)(const struct winrt_capture *capture);
-typedef void (*PFN_winrt_capture_show_cursor)(struct winrt_capture *capture,
+typedef BOOL (*PFN_winrt_capture_show_cursor)(struct winrt_capture *capture,
 					      BOOL visible);
 typedef void (*PFN_winrt_capture_render)(struct winrt_capture *capture,
 					 gs_effect_t *effect);
@@ -77,7 +79,6 @@ struct window_capture {
 
 	struct dc_capture capture;
 
-	bool wgc_supported;
 	bool previously_failed;
 	void *winrt_module;
 	struct winrt_exports exports;
@@ -172,6 +173,8 @@ static void log_settings(struct window_capture *wc, obs_data_t *s)
 	}
 }
 
+extern bool wgc_supported;
+
 static void update_settings(struct window_capture *wc, obs_data_t *s)
 {
 	pthread_mutex_lock(&wc->update_mutex);
@@ -186,7 +189,7 @@ static void update_settings(struct window_capture *wc, obs_data_t *s)
 
 	build_window_strings(window, &wc->class, &wc->title, &wc->executable);
 
-	wc->method = choose_method(method, wc->wgc_supported, wc->class);
+	wc->method = choose_method(method, wgc_supported, wc->class);
 	wc->priority = (enum window_priority)priority;
 	wc->cursor = obs_data_get_bool(s, "cursor");
 	wc->use_wildcards = obs_data_get_bool(s, "use_wildcards");
@@ -234,6 +237,8 @@ static bool load_winrt_imports(struct winrt_exports *exports, void *module,
 	return success;
 }
 
+extern bool graphics_uses_d3d11;
+
 static void *wc_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct window_capture *wc = bzalloc(sizeof(struct window_capture));
@@ -241,18 +246,12 @@ static void *wc_create(obs_data_t *settings, obs_source_t *source)
 
 	pthread_mutex_init(&wc->update_mutex, NULL);
 
-	obs_enter_graphics();
-	const bool uses_d3d11 = gs_get_device_type() == GS_DEVICE_DIRECT3D_11;
-	obs_leave_graphics();
-
-	if (uses_d3d11) {
+	if (graphics_uses_d3d11) {
 		static const char *const module = "libobs-winrt";
 		wc->winrt_module = os_dlopen(module);
-		if (wc->winrt_module &&
-		    load_winrt_imports(&wc->exports, wc->winrt_module,
-				       module) &&
-		    wc->exports.winrt_capture_supported()) {
-			wc->wgc_supported = true;
+		if (wc->winrt_module) {
+			load_winrt_imports(&wc->exports, wc->winrt_module,
+					   module);
 		}
 	}
 
@@ -290,17 +289,23 @@ static void wc_destroy(void *data)
 	obs_queue_task(OBS_TASK_GRAPHICS, wc_actual_destroy, data, false);
 }
 
+static void force_reset(struct window_capture *wc)
+{
+	wc->window = NULL;
+	wc->resize_timer = RESIZE_CHECK_TIME;
+	wc->check_window_timer = WC_CHECK_TIMER;
+	wc->cursor_check_time = CURSOR_CHECK_TIME;
+
+	wc->previously_failed = false;
+}
+
 static void wc_update(void *data, obs_data_t *settings)
 {
 	struct window_capture *wc = data;
 	update_settings(wc, settings);
 	log_settings(wc, settings);
 
-	/* forces a reset */
-	wc->window = NULL;
-	wc->check_window_timer = WC_CHECK_TIMER;
-
-	wc->previously_failed = false;
+	force_reset(wc);
 }
 
 static uint32_t wc_width(void *data)
@@ -358,6 +363,9 @@ static bool wc_capture_method_changed(obs_properties_t *props,
 	UNUSED_PARAMETER(p);
 
 	struct window_capture *wc = obs_properties_get_param(props);
+	if (!wc)
+		return false;
+
 	update_settings(wc, settings);
 
 	update_settings_visibility(props, wc);
@@ -374,6 +382,9 @@ static bool wc_window_changed(obs_properties_t *props, obs_property_t *p,
 			      obs_data_t *settings)
 {
 	struct window_capture *wc = obs_properties_get_param(props);
+	if (!wc)
+		return false;
+
 	update_settings(wc, settings);
 
 	update_settings_visibility(props, wc);
@@ -402,7 +413,7 @@ static obs_properties_t *wc_properties(void *data)
 	obs_property_list_add_int(p, TEXT_METHOD_AUTO, METHOD_AUTO);
 	obs_property_list_add_int(p, TEXT_METHOD_BITBLT, METHOD_BITBLT);
 	obs_property_list_add_int(p, TEXT_METHOD_WGC, METHOD_WGC);
-	obs_property_list_item_disable(p, 2, !wc->wgc_supported);
+	obs_property_list_item_disable(p, 2, !wgc_supported);
 	obs_property_set_modified_callback(p, wc_capture_method_changed);
 
 	p = obs_properties_add_list(ppts, "priority", TEXT_MATCH_PRIORITY,
@@ -431,9 +442,6 @@ static void wc_hide(void *data)
 
 	memset(&wc->last_rect, 0, sizeof(wc->last_rect));
 }
-
-#define RESIZE_CHECK_TIME 0.2f
-#define CURSOR_CHECK_TIME 0.2f
 
 static void wc_tick(void *data, float seconds)
 {
@@ -489,7 +497,7 @@ static void wc_tick(void *data, float seconds)
 	}
 
 	wc->cursor_check_time += seconds;
-	if (wc->cursor_check_time > CURSOR_CHECK_TIME) {
+	if (wc->cursor_check_time >= CURSOR_CHECK_TIME) {
 		DWORD foreground_pid, target_pid;
 
 		// Can't just compare the window handle in case of app with child windows
@@ -503,9 +511,12 @@ static void wc_tick(void *data, float seconds)
 		const bool cursor_hidden = foreground_pid && target_pid &&
 					   foreground_pid != target_pid;
 		wc->capture.cursor_hidden = cursor_hidden;
-		if (wc->capture_winrt)
-			wc->exports.winrt_capture_show_cursor(wc->capture_winrt,
-							      !cursor_hidden);
+		if (wc->capture_winrt &&
+		    !wc->exports.winrt_capture_show_cursor(wc->capture_winrt,
+							   !cursor_hidden)) {
+			force_reset(wc);
+			return;
+		}
 
 		wc->cursor_check_time = 0.0f;
 	}
@@ -586,7 +597,8 @@ static void wc_render(void *data, gs_effect_t *effect)
 struct obs_source_info window_capture_info = {
 	.id = "window_capture",
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW |
+			OBS_SOURCE_SRGB,
 	.get_name = wc_getname,
 	.create = wc_create,
 	.destroy = wc_destroy,

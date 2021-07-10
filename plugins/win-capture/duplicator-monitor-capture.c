@@ -39,8 +39,6 @@ typedef struct winrt_capture *(*PFN_winrt_capture_init_monitor)(
 typedef void (*PFN_winrt_capture_free)(struct winrt_capture *capture);
 
 typedef BOOL (*PFN_winrt_capture_active)(const struct winrt_capture *capture);
-typedef void (*PFN_winrt_capture_show_cursor)(struct winrt_capture *capture,
-					      BOOL visible);
 typedef void (*PFN_winrt_capture_render)(struct winrt_capture *capture,
 					 gs_effect_t *effect);
 typedef uint32_t (*PFN_winrt_capture_width)(const struct winrt_capture *capture);
@@ -54,7 +52,6 @@ struct winrt_exports {
 	PFN_winrt_capture_init_monitor winrt_capture_init_monitor;
 	PFN_winrt_capture_free winrt_capture_free;
 	PFN_winrt_capture_active winrt_capture_active;
-	PFN_winrt_capture_show_cursor winrt_capture_show_cursor;
 	PFN_winrt_capture_render winrt_capture_render;
 	PFN_winrt_capture_width winrt_capture_width;
 	PFN_winrt_capture_height winrt_capture_height;
@@ -88,7 +85,6 @@ struct duplicator_capture {
 	float reset_timeout;
 	struct cursor_data cursor_data;
 
-	bool wgc_supported;
 	void *winrt_module;
 	struct winrt_exports exports;
 	struct winrt_capture *capture_winrt;
@@ -179,6 +175,8 @@ choose_method(enum display_capture_method method, bool wgc_supported,
 	return method;
 }
 
+extern bool wgc_supported;
+
 static inline void update_settings(struct duplicator_capture *capture,
 				   obs_data_t *settings)
 {
@@ -189,8 +187,8 @@ static inline void update_settings(struct duplicator_capture *capture,
 	EnumDisplayMonitors(NULL, NULL, enum_monitor, (LPARAM)&monitor);
 
 	capture->method = choose_method(
-		(int)obs_data_get_int(settings, "method"),
-		capture->wgc_supported, monitor.handle, &capture->dxgi_index);
+		(int)obs_data_get_int(settings, "method"), wgc_supported,
+		monitor.handle, &capture->dxgi_index);
 
 	capture->monitor = monitor.id;
 	capture->handle = monitor.handle;
@@ -302,13 +300,14 @@ static bool load_winrt_imports(struct winrt_exports *exports, void *module,
 	WINRT_IMPORT(winrt_capture_init_monitor);
 	WINRT_IMPORT(winrt_capture_free);
 	WINRT_IMPORT(winrt_capture_active);
-	WINRT_IMPORT(winrt_capture_show_cursor);
 	WINRT_IMPORT(winrt_capture_render);
 	WINRT_IMPORT(winrt_capture_width);
 	WINRT_IMPORT(winrt_capture_height);
 
 	return success;
 }
+
+extern bool graphics_uses_d3d11;
 
 static void *duplicator_capture_create(obs_data_t *settings,
 				       obs_source_t *source)
@@ -320,18 +319,12 @@ static void *duplicator_capture_create(obs_data_t *settings,
 
 	pthread_mutex_init(&capture->update_mutex, NULL);
 
-	obs_enter_graphics();
-	const bool uses_d3d11 = gs_get_device_type() == GS_DEVICE_DIRECT3D_11;
-	obs_leave_graphics();
-
-	if (uses_d3d11) {
+	if (graphics_uses_d3d11) {
 		static const char *const module = "libobs-winrt";
 		capture->winrt_module = os_dlopen(module);
-		if (capture->winrt_module &&
-		    load_winrt_imports(&capture->exports, capture->winrt_module,
-				       module) &&
-		    capture->exports.winrt_capture_supported()) {
-			capture->wgc_supported = true;
+		if (capture->winrt_module) {
+			load_winrt_imports(&capture->exports,
+					   capture->winrt_module, module);
 		}
 	}
 
@@ -397,10 +390,11 @@ static void duplicator_capture_tick(void *data, float seconds)
 			capture->showing = false;
 		}
 		return;
+	}
 
-		/* always try to load the capture immediately when the source is first
+	/* always try to load the capture immediately when the source is first
 	 * shown */
-	} else if (!capture->showing) {
+	if (!capture->showing) {
 		capture->reset_timeout = RESET_INTERVAL_SEC;
 	}
 
@@ -427,12 +421,6 @@ static void duplicator_capture_tick(void *data, float seconds)
 
 				capture->reset_timeout = 0.0f;
 			}
-		}
-
-		if (capture->capture_winrt) {
-			capture->exports.winrt_capture_show_cursor(
-				capture->capture_winrt,
-				capture->capture_cursor);
 		}
 	} else {
 		if (capture->capture_winrt) {
@@ -533,8 +521,6 @@ static void duplicator_capture_render(void *data, gs_effect_t *effect)
 
 		rot = capture->rot;
 
-		const bool previous = gs_set_linear_srgb(false);
-
 		while (gs_effect_loop(effect, "Draw")) {
 			if (rot != 0) {
 				float x = 0.0f;
@@ -564,8 +550,6 @@ static void duplicator_capture_render(void *data, gs_effect_t *effect)
 			if (rot != 0)
 				gs_matrix_pop();
 		}
-
-		gs_set_linear_srgb(previous);
 
 		if (capture->capture_cursor) {
 			effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
@@ -644,6 +628,9 @@ static bool display_capture_method_changed(obs_properties_t *props,
 	UNUSED_PARAMETER(p);
 
 	struct duplicator_capture *capture = obs_properties_get_param(props);
+	if (!capture)
+		return false;
+
 	update_settings(capture, settings);
 
 	update_settings_visibility(props, capture);
@@ -665,7 +652,7 @@ static obs_properties_t *duplicator_capture_properties(void *data)
 	obs_property_list_add_int(p, TEXT_METHOD_AUTO, METHOD_AUTO);
 	obs_property_list_add_int(p, TEXT_METHOD_DXGI, METHOD_DXGI);
 	obs_property_list_add_int(p, TEXT_METHOD_WGC, METHOD_WGC);
-	obs_property_list_item_disable(p, 1, !capture->wgc_supported);
+	obs_property_list_item_disable(p, 2, !wgc_supported);
 	obs_property_set_modified_callback(p, display_capture_method_changed);
 
 	obs_property_t *monitors = obs_properties_add_list(

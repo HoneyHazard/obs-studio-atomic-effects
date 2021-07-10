@@ -109,10 +109,7 @@ static void gl_write_var(struct gl_shader_parser *glsp, struct shader_var *var)
 {
 	char *layout_str;
 
-	if (glsp->version < 460)
-		glsp->version = 460;
 	if (strcmp(var->type, "atomic_uint") == 0) {
-
 		layout_str = bmalloc(64);
 		snprintf(layout_str, 64, "layout (binding = %u, offset = %u) ",
 			 var->atomic_counter_index, 0);
@@ -756,11 +753,10 @@ static bool gl_shader_buildstring(struct gl_shader_parser *glsp)
 		return false;
 	}
 
-	{
-		version_str = bmalloc(64);
-		snprintf(version_str, 64, "#version %d\n\n", glsp->version);
-		dstr_copy(&glsp->gl_string, version_str);
-		bfree(version_str);
+	if (glsp->parser.atomic_counter_next_index == 0) {
+		dstr_copy(&glsp->gl_string, "#version 330\n\n");
+	} else {
+		dstr_copy(&glsp->gl_string, "#version 460\n\n");
 	}
 
 	dstr_cat(&glsp->gl_string, "const bool obs_glsl_compile = true;\n\n");
