@@ -106,6 +106,16 @@ static inline bool gl_write_type_token(struct gl_shader_parser *glsp,
 
 static void gl_write_var(struct gl_shader_parser *glsp, struct shader_var *var)
 {
+	char *layout_str;
+
+	if (strcmp(var->type, "atomic_uint") == 0) {
+		layout_str = bmalloc(64);
+		snprintf(layout_str, 64, "layout (binding = %u, offset = %u) ",
+			 var->atomic_counter_index, 0);
+		dstr_cat(&glsp->gl_string, layout_str);
+		bfree(layout_str);
+	}
+
 	if (var->var_type == SHADER_VAR_UNIFORM)
 		dstr_cat(&glsp->gl_string, "uniform ");
 	else if (var->var_type == SHADER_VAR_CONST)
@@ -741,7 +751,12 @@ static bool gl_shader_buildstring(struct gl_shader_parser *glsp)
 		return false;
 	}
 
-	dstr_copy(&glsp->gl_string, "#version 330\n\n");
+	if (glsp->parser.atomic_counter_next_index == 0) {
+		dstr_copy(&glsp->gl_string, "#version 330\n\n");
+	} else {
+		dstr_copy(&glsp->gl_string, "#version 460\n\n");
+	}
+
 	dstr_cat(&glsp->gl_string, "const bool obs_glsl_compile = true;\n\n");
 	dstr_cat(&glsp->gl_string,
 		 "vec4 obs_load_2d(sampler2D s, ivec3 p_lod)\n");
